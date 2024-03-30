@@ -41,6 +41,43 @@ __global__ void conv3DKernelWithBias(float* input, float* output, float* kernel,
     }
 }
 
+__global__ void maxPoolingKernel(float* input, float* output, 
+                                                    int inputHeight, int inputWidth, int channels,
+                                                    int poolHeight, int poolWidth, 
+                                                    int outputHeight, int outputWidth, int stride) {
+    int outX = blockIdx.x * blockDim.x + threadIdx.x;
+    int outY = blockIdx.y * blockDim.y + threadIdx.y;
+    int channel = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if (outX < outputWidth && outY < outputHeight && channel < channels) {
+        float maxVal = -FLT_MAX;  // Initialize to smallest float value
+        for (int poolY = 0; poolY < poolHeight; ++poolY) {
+            for (int poolX = 0; poolX < poolWidth; ++poolX) {
+                int inX = outX * stride + poolX;
+                int inY = outY * stride + poolY;
+                if (inX < inputWidth && inY < inputHeight) {
+                    // Calculate index for channel-consecutive input
+                    int inputIndex = (channel * inputHeight * inputWidth) + (inY * inputWidth + inX);
+                    maxVal = fmaxf(maxVal, input[inputIndex]);
+                }
+            }
+        }
+
+        // Write the max value to output, using channel-consecutive indexing
+        int outputIndex = (channel * outputHeight * outputWidth) + (outY * outputWidth + outX);
+        output[outputIndex] = maxVal;
+    }
+}
+
+__global__ void reluKernel(float* inputOutput, int numElements) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < numElements) {
+        inputOutput[idx] = fmaxf(0.0f, inputOutput[idx]);
+    }
+}
+
+
+
 int main() {
     // Initialize dimensions based on the architecture
     // const int inputSize = 28 * 28;  // Input image size for MNIST
@@ -89,6 +126,8 @@ int main() {
     const int outputWidth = 24;
     const int outputHeight = 24;
     const int outputChannels = 20; // Number of filters
+    const int kernelHeight = 5;
+    const int kernelWidth = 5;
 
     // Flatten input and output dimensions for easier memory allocation
     const int inputSize = inputWidth * inputHeight * inputChannels;
@@ -100,41 +139,57 @@ int main() {
     cudaMalloc(&d_input, inputSize * sizeof(float));
     cudaMalloc(&d_output, outputSize * sizeof(float));
     // For weights: 20 filters each of size 5x5, and 20 bias values
-    cudaMalloc(&d_weights, 20 * 5 * 5 * sizeof(float));
-    cudaMalloc(&d_biases, 20 * sizeof(float));
+    cudaMalloc(&d_weights, outputChannels * kernelWidth * kernelHeight * sizeof(float));
+    cudaMalloc(&d_biases, outputChannels * sizeof(float));
 
 
-    cudaMemcpy(d_input, img_dat.data() , 28*28 * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_weights, weights_and_bias.data(), 500 * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_biases, weights_and_bias.data() + 500, 20 * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_input, img_dat.data() , inputSize * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_weights, weights_and_bias.data(), outputChannels * kernelWidth * kernelHeight * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_biases, weights_and_bias.data() + outputChannels * kernelWidth * kernelHeight, outputChannels * sizeof(float), cudaMemcpyHostToDevice);
     dim3 blockDim(16, 16, 1); // Keep z-dimension as 1 for simplicity in 2D convolutions
 
     dim3 gridDim((outputWidth + blockDim.x - 1) / blockDim.x,
                 (outputHeight + blockDim.y - 1) / blockDim.y,
                 outputChannels); // Ensure each output channel is handled
     // Launch the convolution kernel
-    conv3DKernelWithBias<<<gridDim, blockDim>>>(float* input, float* output, float* kernel, float* biases,
-                                     int inputHeight, int inputWidth, int inputChannels,
-                                     int outputHeight, int outputWidth, int outputChannels,
-                                     int kernelHeight, int kernelWidth);
+    conv3DKernelWithBias<<<gridDim, blockDim>>>(d_input, d_output, d_weights, d_biases,
+                                      inputHeight,  inputWidth,  inputChannels,
+                                      outputHeight,  outputWidth,  outputChannels,
+                                      kernelHeight,  kernelWidth);
     // Allocate memory for d_output on host
     std::vector<float> h_output(outputWidth * outputHeight * outputChannels);
 
     // Copy data from device to host
     cudaMemcpy(h_output.data(), d_output, outputWidth * outputHeight * outputChannels * sizeof(float), cudaMemcpyDeviceToHost);
 
-    // Print the d_output
-    std::cout << "d_output:" << std::endl;
+    // Output file path
+    const std::string output_file_path = "d_output.txt";
+
+    // Open the output file
+    std::ofstream output_file(output_file_path);
+
+    if (!output_file.is_open()) {
+        std::cerr << "Error: Unable to open output file" << std::endl;
+        return 1;
+    }
+
+    // Print the d_output to the file
     for (int c = 0; c < outputChannels; ++c) {
-        std::cout << "Channel " << c << ":" << std::endl;
+        output_file << "Channel " << c << ":" << std::endl;
         for (int i = 0; i < outputHeight; ++i) {
             for (int j = 0; j < outputWidth; ++j) {
-                std::cout << h_output[(c * outputHeight * outputWidth) + (i * outputWidth) + j] << " ";
+                output_file << h_output[(c * outputHeight * outputWidth) + (i * outputWidth) + j] << " ";
             }
-            std::cout << std::endl;
+            output_file << std::endl;
         }
-        std::cout << std::endl;
+        output_file << std::endl;
     }
+
+    // Close the output file
+    output_file.close();
+
+    std::cout << "d_output written to file: " << output_file_path << std::endl;
+
 
     
     cudaFree(d_input);
@@ -164,11 +219,11 @@ int main() {
     // Similar to FC1, adjust for the final output size and activation (if any)
 
     // Copy final layer output back to host
-    std::vector<float> h_output( /* size of the final output layer */ );
+    // std::vector<float> h_output( /* size of the final output layer */ );
     // cudaMemcpy from d_fc2Output to h_output.data()
 
     // Apply Softmax on CPU for classification
-    std::vector<float> probabilities = softmax(h_output);  // Assuming softmax is defined on the host
+    // std::vector<float> probabilities = softmax(h_output);  // Assuming softmax is defined on the host
 
     // Output the top probabilities or classification result
 
