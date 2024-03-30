@@ -5,17 +5,17 @@
 // Assume the existence of utility functions and CUDA kernel prototypes:
 // loadWeights, convLayerKernel, reluKernel, maxPoolingKernel, fullyConnectedKernel
 __global__ void conv3DKernelWithBias(float* input, float* output, float* kernel, float* biases,
-                                                        int inputHeight, int inputWidth, int inputChannels,
-                                                        int outputHeight, int outputWidth, int outputChannels,
+                                                        int inputHeight, int inputWidth, int inputChannels_l1,
+                                                        int outputHeight, int outputWidth, int outputChannels_l1,
                                                         int kernelHeight, int kernelWidth) {
     int outX = blockIdx.x * blockDim.x + threadIdx.x;
     int outY = blockIdx.y * blockDim.y + threadIdx.y;
     int outZ = blockIdx.z * blockDim.z + threadIdx.z;
 
-    if (outX < outputWidth && outY < outputHeight && outZ < outputChannels) {
+    if (outX < outputWidth && outY < outputHeight && outZ < outputChannels_l1) {
         float value = 0.0f;
 
-        for (int k = 0; k < inputChannels; ++k) {
+        for (int k = 0; k < inputChannels_l1; ++k) {
             for (int offsetY = 0; offsetY < kernelHeight; ++offsetY) {
                 for (int offsetX = 0; offsetX < kernelWidth; ++offsetX) {
                     int inX = outX + offsetX ; // Not Assuming kernel is centered over the pixel
@@ -25,7 +25,7 @@ __global__ void conv3DKernelWithBias(float* input, float* output, float* kernel,
                         // Adjust index for channel-consecutive storage
                         int inputIndex = (k * inputHeight * inputWidth) + (inY * inputWidth + inX);
                         
-                        int kernelIndex = (outZ * inputChannels * kernelHeight * kernelWidth) + 
+                        int kernelIndex = (outZ * inputChannels_l1 * kernelHeight * kernelWidth) + 
                                           (k * kernelHeight * kernelWidth) + 
                                           (offsetY * kernelWidth) + offsetX;
                         
@@ -42,29 +42,29 @@ __global__ void conv3DKernelWithBias(float* input, float* output, float* kernel,
 }
 
 __global__ void maxPoolingKernel(float* input, float* output, 
-                                                    int inputHeight, int inputWidth, int channels,
-                                                    int poolHeight, int poolWidth, 
-                                                    int outputHeight, int outputWidth, int stride) {
+                                                    int inputHeight, int channels,
+                                                    int poolHeight, 
+                                                    int outputHeight,  int stride) {
     int outX = blockIdx.x * blockDim.x + threadIdx.x;
     int outY = blockIdx.y * blockDim.y + threadIdx.y;
     int channel = blockIdx.z * blockDim.z + threadIdx.z;
 
-    if (outX < outputWidth && outY < outputHeight && channel < channels) {
+    if (outX < outputHeight && outY < outputHeight && channel < channels) {
         float maxVal = -FLT_MAX;  // Initialize to smallest float value
         for (int poolY = 0; poolY < poolHeight; ++poolY) {
-            for (int poolX = 0; poolX < poolWidth; ++poolX) {
+            for (int poolX = 0; poolX < poolHeight; ++poolX) {
                 int inX = outX * stride + poolX;
                 int inY = outY * stride + poolY;
-                if (inX < inputWidth && inY < inputHeight) {
+                if (inX < poolHeight && inY < inputHeight) {
                     // Calculate index for channel-consecutive input
-                    int inputIndex = (channel * inputHeight * inputWidth) + (inY * inputWidth + inX);
+                    int inputIndex = (channel * inputHeight * poolHeight) + (inY * poolHeight + inX);
                     maxVal = fmaxf(maxVal, input[inputIndex]);
                 }
             }
         }
 
         // Write the max value to output, using channel-consecutive indexing
-        int outputIndex = (channel * outputHeight * outputWidth) + (outY * outputWidth + outX);
+        int outputIndex = (channel * outputHeight * outputHeight) + (outY * outputHeight + outX);
         output[outputIndex] = maxVal;
     }
 }
@@ -118,20 +118,28 @@ int main() {
     
     file.close();
     img_file.close();
+
+     // *** Execute Network Layers ***
+
+    // Convolution Layer 1
+    // convLayerKernel<<<gridDimConv1, blockDimConv1>>>(d_input, d_conv1Output, d_conv1Weights, /* other params */);
+    // Apply ReLU Activation
+    // reluKernel<<<gridDimRelu1, blockDimRelu1>>>(d_conv1Output, d_conv1Output, conv1OutputSize);
+
     
     // Assuming input image dimensions and Conv_1 output dimensions
     const int inputWidth = 28;
     const int inputHeight = 28;
-    const int inputChannels = 1; // Grayscale image
+    const int inputChannels_l1 = 1; // Grayscale image
     const int outputWidth = 24;
     const int outputHeight = 24;
-    const int outputChannels = 20; // Number of filters
+    const int outputChannels_l1 = 20; // Number of filters
     const int kernelHeight = 5;
     const int kernelWidth = 5;
 
     // Flatten input and output dimensions for easier memory allocation
-    const int inputSize = inputWidth * inputHeight * inputChannels;
-    const int outputSize = outputWidth * outputHeight * outputChannels;
+    const int inputSize = inputWidth * inputHeight * inputChannels_l1;
+    const int outputSize = outputWidth * outputHeight * outputChannels_l1;
 
     float *d_input, *d_output, *d_weights, *d_biases;
 
@@ -139,28 +147,28 @@ int main() {
     cudaMalloc(&d_input, inputSize * sizeof(float));
     cudaMalloc(&d_output, outputSize * sizeof(float));
     // For weights: 20 filters each of size 5x5, and 20 bias values
-    cudaMalloc(&d_weights, outputChannels * kernelWidth * kernelHeight * sizeof(float));
-    cudaMalloc(&d_biases, outputChannels * sizeof(float));
+    cudaMalloc(&d_weights, outputChannels_l1 * kernelWidth * kernelHeight * sizeof(float));
+    cudaMalloc(&d_biases, outputChannels_l1 * sizeof(float));
 
 
     cudaMemcpy(d_input, img_dat.data() , inputSize * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_weights, weights_and_bias.data(), outputChannels * kernelWidth * kernelHeight * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_biases, weights_and_bias.data() + outputChannels * kernelWidth * kernelHeight, outputChannels * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_weights, weights_and_bias.data(), outputChannels_l1 * kernelWidth * kernelHeight * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_biases, weights_and_bias.data() + outputChannels_l1 * kernelWidth * kernelHeight, outputChannels_l1 * sizeof(float), cudaMemcpyHostToDevice);
     dim3 blockDim(16, 16, 1); // Keep z-dimension as 1 for simplicity in 2D convolutions
 
     dim3 gridDim((outputWidth + blockDim.x - 1) / blockDim.x,
                 (outputHeight + blockDim.y - 1) / blockDim.y,
-                outputChannels); // Ensure each output channel is handled
+                outputChannels_l1); // Ensure each output channel is handled
     // Launch the convolution kernel
     conv3DKernelWithBias<<<gridDim, blockDim>>>(d_input, d_output, d_weights, d_biases,
-                                      inputHeight,  inputWidth,  inputChannels,
-                                      outputHeight,  outputWidth,  outputChannels,
+                                      inputHeight,  inputWidth,  inputChannels_l1,
+                                      outputHeight,  outputWidth,  outputChannels_l1,
                                       kernelHeight,  kernelWidth);
     // Allocate memory for d_output on host
-    std::vector<float> h_output(outputWidth * outputHeight * outputChannels);
+    std::vector<float> h_output(outputWidth * outputHeight * outputChannels_l1);
 
     // Copy data from device to host
-    cudaMemcpy(h_output.data(), d_output, outputWidth * outputHeight * outputChannels * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_output.data(), d_output, outputWidth * outputHeight * outputChannels_l1 * sizeof(float), cudaMemcpyDeviceToHost);
 
     // Output file path
     const std::string output_file_path = "d_output.txt";
@@ -174,7 +182,7 @@ int main() {
     }
 
     // Print the d_output to the file
-    for (int c = 0; c < outputChannels; ++c) {
+    for (int c = 0; c < outputChannels_l1; ++c) {
         output_file << "Channel " << c << ":" << std::endl;
         for (int i = 0; i < outputHeight; ++i) {
             for (int j = 0; j < outputWidth; ++j) {
@@ -193,20 +201,33 @@ int main() {
 
     
     cudaFree(d_input);
-    cudaFree(d_output);
     cudaFree(d_weights);
     cudaFree(d_biases);
-    ///
-
-    // *** Execute Network Layers ***
-
-    // Convolution Layer 1
-    // convLayerKernel<<<gridDimConv1, blockDimConv1>>>(d_input, d_conv1Output, d_conv1Weights, /* other params */);
-    // Apply ReLU Activation
-    // reluKernel<<<gridDimRelu1, blockDimRelu1>>>(d_conv1Output, d_conv1Output, conv1OutputSize);
-
-    // Pooling Layer 1 (Max Pooling)
+    // cudaFree(d_output); this is input for next layer
+   
+    // Layer#2 Pooling Layer (Max Pooling)
     // maxPoolingKernel<<<gridDimPool1, blockDimPool1>>>(d_conv1Output, d_pool1Output, /* other params */);
+
+
+    const int poolDimension = 2;
+    const int stride = 2;
+    const int inputDimension_l2 = 24
+    const int outputDimension_l2 = 12;
+    const int outputChannels_l2 = 20;
+    const int outputSize_l2 = outputDimension_l2*outputDimension_l2*outputChannels_l2;
+
+    cudaMalloc(&d_output_l2, outputSize * sizeof(float));
+
+    dim3 blockDim(16, 16, 1); // A common choice, but adjust based on your specific requirements
+    dim3 gridDim((outputDimension_l2 + blockDim.x - 1) / blockDim.x, 
+                (outputDimension_l2 + blockDim.y - 1) / blockDim.y, 
+                outputChannels_l2);
+
+    // Launch the kernel with calculated dimensions
+    maxPoolingKernel_ChannelConsecutive<<<gridDim, blockDim>>>(d_output, d_output_l2, 
+                                                                inputDimension_l2, channels_l2, 
+                                                                poolDimension, 
+                                                                inputDimension_l2, stride);
 
     // Convolution Layer 2
     // Repeat the process for subsequent layers, matching the architecture specifics...
