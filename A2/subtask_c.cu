@@ -207,7 +207,7 @@ int main() {
    
     // Layer#2 Pooling Layer (Max Pooling)
     // maxPoolingKernel<<<gridDimPool1, blockDimPool1>>>(d_conv1Output, d_pool1Output, /* other params */);
-
+    float *d_output_l2;
 
     const int poolDimension = 2;
     const int stride = 2;
@@ -224,13 +224,72 @@ int main() {
                 outputChannels_l2);
 
     // Launch the kernel with calculated dimensions
-    maxPoolingKernel_ChannelConsecutive<<<gridDim, blockDim>>>(d_output, d_output_l2, 
+    maxPoolingKernel<<<gridDim, blockDim>>>(d_output, d_output_l2, 
                                                                 inputDimension_l2, channels_l2, 
                                                                 poolDimension, 
-                                                                inputDimension_l2, stride);
+                                                                outputDimension_l2, stride);
 
-    // Convolution Layer 2
+    // Layer #3: Convolution Layer
     // Repeat the process for subsequent layers, matching the architecture specifics...
+    std::ifstream file2("./trained_weights/conv2.txt");
+    
+    if (!file2.is_open()) {
+        std::cerr << "Error: Unable to open file" << std::endl;
+        return 1;
+    }
+    weights_and_bias.clear();
+    
+    while (file2 >> value) {
+        weights_and_bias.push_back(value);
+    }
+    // Assuming input image dimensions and Conv_1 output dimensions
+    const int inputDimension_l3 = 12;
+    const int inputChannels_l3 = 20; // Grayscale image
+    const int outputDimension_l3 = 8;
+    const int outputChannels_l3 = 50; // Number of filters
+    const int kernelDimension_l3 = 5;
+
+    // Flatten input and output dimensions for easier memory allocation
+    const int inputSize_l3 = inputDimension_l3 * inputDimension_l3 * inputChannels_l3;
+    const int outputSize_l3 = outputDimension_l3 * outputDimension_l3 * outputChannels_l3;
+
+    cudaMalloc(&d_output, outputSize * sizeof(float));
+    // For weights: 20 filters each of size 5x5, and 20 bias values
+    cudaMalloc(&d_weights, outputChannels_l3 * kernelDimension_l3 * kernelDimension_l3 * sizeof(float));
+    cudaMalloc(&d_biases, outputChannels_l3 * sizeof(float));
+
+    cudaMemcpy(d_weights, weights_and_bias.data(), outputChannels_l3 * kernelDimension_l3 * kernelDimension_l3 * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_biases, weights_and_bias.data() + outputChannels_l3 * kernelDimension_l3 * kernelDimension_l3, outputChannels_l3 * sizeof(float), cudaMemcpyHostToDevice);
+    dim3 blockDim(16, 16, 1); // Keep z-dimension as 1 for simplicity in 2D convolutions
+
+    dim3 gridDim((outputWidth + blockDim.x - 1) / blockDim.x,
+                (outputHeight + blockDim.y - 1) / blockDim.y,
+                outputChannels_l3); // Ensure each output channel is handled
+    // Launch the convolution kernel
+    conv3DKernelWithBias<<<gridDim, blockDim>>>(d_output_l2, d_output_l3, d_weights, d_biases,
+                                      inputDimension_l3,  inputDimension_l3,  inputChannels_l3,
+                                      outputDimension_l3,  outputDimension_l3,  outputChannels_l3,
+                                      kernelDimension_l3,  kernelDimension_l3);
+
+    // Layer #4: Maxpooling
+    float *d_output_l4;
+    const int inputDimension_l4 = 8
+    const int outputDimension_l4 = 4;
+    const int outputChannels_l4 = 50;
+    const int outputSize_l2 = outputDimension_l4*outputDimension_l4*outputChannels_l4;
+
+    cudaMalloc(&d_output_l4, outputSize * sizeof(float));
+
+    dim3 blockDim(16, 16, 1); // A common choice, but adjust based on your specific requirements
+    dim3 gridDim((outputDimension_l4 + blockDim.x - 1) / blockDim.x, 
+                (outputDimension_l4 + blockDim.y - 1) / blockDim.y, 
+                outputChannels_l4);
+
+    // Launch the kernel with calculated dimensions
+    maxPoolingKernel<<<gridDim, blockDim>>>(d_output_l3, d_output_l4, 
+                                                                inputDimension_l4, channels_l4, 
+                                                                poolDimension, 
+                                                                outputDimension_l4, stride);
 
     // Fully Connected Layers - Consider handling these differently as they may not be direct convolutions
     // fullyConnectedKernel<<<gridDimFC1, blockDimFC1>>>(d_pool2Output, d_fc1Output, d_fc1Weights, /* other params */);
